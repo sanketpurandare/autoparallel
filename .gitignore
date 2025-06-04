@@ -1,0 +1,12 @@
+*~
+*.swp
+
+*.pyc
+*.pyo
+*.so
+
+.mypy_cache/
+*.egg-info/
+
+build/
+dist/
