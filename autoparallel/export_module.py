@@ -1,3 +1,8 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
+#
+# This source code is licensed under the BSD license found in the
+# LICENSE file in the root directory of this source tree.
+
 # Copied from
 # https://github.com/pytorch/pytorch/blob/1cc5f6b623907579a0e3e172b061391b171b9fa5/torch/_functorch/aot_autograd.py#L1211
 # with modifications to support passing the gradients
