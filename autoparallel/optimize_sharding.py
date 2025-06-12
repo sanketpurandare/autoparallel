@@ -409,7 +409,7 @@ class ShardingOptimizer:
             opt.setdefault(nodes[x[0]], []).append(self.ds[x])
 
         # Let's simplify the output representation
-        # and just return a single PlacementStrategy
+        # and just return a single OpSpec
         # for each node
         for k in opt.values():
             assert all(
