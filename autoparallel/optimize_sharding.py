@@ -2,10 +2,11 @@ import math
 
 import pulp
 import torch
-from .propagation_rules import _create_all_options
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torch.utils._pytree import tree_flatten, tree_map_only
+
+from .propagation_rules import _create_all_options
 from .utils import get_placement_options
 
 
@@ -19,7 +20,7 @@ def _debug_node(node):
     print(tree_map_only(torch.fx.Node, my_print, node.args))
 
 
-_GLOBAL_NAMES = {}
+_GLOBAL_NAMES: dict[str, int] = {}
 
 
 def _get_next_name(name):
@@ -373,7 +374,7 @@ class ShardingOptimizer:
         self.print_violated_constraints()
 
     def print_costs_for_node(self, node, arg=0, **kwargs):
-        from tabulate import tabulate
+        from tabulate import tabulate  # type: ignore
         from torch.distributed.tensor._op_schema import _pretty_print_spec
 
         tgt_strat = self.strats[node]

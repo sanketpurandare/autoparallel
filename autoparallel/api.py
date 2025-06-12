@@ -4,14 +4,15 @@ from contextlib import suppress
 
 import torch
 import torch.utils._pytree as pytree
-from .apply_sharding import apply_sharding_to_model
-from .export_module import aot_export_module, apply_node_renaming
-from .optimize_sharding import ShardingOptimizer
 from torch._functorch.partitioners import default_partition
 from torch._inductor.decomposition import select_decomp_table
 from torch._inductor.fx_passes.joint_graph import joint_graph_passes
 from torch._inductor.fx_passes.post_grad import remove_assert_ops
 from torch._subclasses import FakeTensorMode
+
+from .apply_sharding import apply_sharding_to_model
+from .export_module import aot_export_module, apply_node_renaming
+from .optimize_sharding import ShardingOptimizer
 
 
 def _add_alias(gm):

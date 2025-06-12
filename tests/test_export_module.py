@@ -1,8 +1,9 @@
 import pytest
 import torch
-from autoparallel.export_module import aot_export_module, apply_node_renaming
 from torch import nn
 from torch._subclasses import FakeTensorMode
+
+from autoparallel.export_module import aot_export_module, apply_node_renaming
 
 
 @pytest.mark.parametrize("requires_grad_1", [False, True])

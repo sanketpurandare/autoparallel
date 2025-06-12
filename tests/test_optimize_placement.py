@@ -1,9 +1,10 @@
 import pytest
 import torch
-from autoparallel.api import AutoParallel
 from torch import nn
 from torch.distributed.tensor.placement_types import Partial, Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
+
+from autoparallel.api import AutoParallel
 
 
 @pytest.fixture(scope="module", autouse=True)

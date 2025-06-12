@@ -1,9 +1,10 @@
 import torch
-from .propagation_rules import _op_partial_rules, _op_rules
 from torch.distributed._tensor.placement_types import TensorMeta
 from torch.distributed.tensor._op_schema import OpSchema, OpStrategy, TupleStrategy
 from torch.distributed.tensor._ops.utils import generate_redistribute_costs
 from torch.utils._pytree import tree_flatten, tree_map_only
+
+from .propagation_rules import _op_partial_rules, _op_rules
 
 
 def propagate_tensor_meta(op, user_args, out_strat):
