@@ -6,6 +6,7 @@ from .propagation_rules import _create_all_options
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torch.utils._pytree import tree_flatten, tree_map_only
+from .compute_estimation import estimate_strategy_runtime_cost
 from .utils import get_placement_options
 
 
@@ -84,15 +85,16 @@ class ShardingOptimizer:
                     "num_output_strat": len(s.strategies),
                 }
             for ss, ssi in enumerate(s.strategies):
+                compute_cost = estimate_strategy_runtime_cost(node, ssi)
                 for argi, xxi in enumerate(ssi.redistribute_cost):
-                    for ii, input_p in enumerate(xxi):
+                    for ii, comm_cost in enumerate(xxi):
                         va = pulp.LpVariable(
                             f"n={node},s={s_i},arg={argi},output_p={ss},input_p={ii}",
                             cat=pulp.LpBinary,
                         )
                         ds[(s_i, argi, ss, ii)] = {
                             "va": va,
-                            "cost": input_p,
+                            "cost": comm_cost + compute_cost,
                             "full_strat": ssi,
                             "out_strat": ssi.output_specs,
                             "inp_strat": ssi.input_specs[argi],
