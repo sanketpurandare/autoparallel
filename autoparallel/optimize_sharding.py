@@ -6,7 +6,7 @@ from .propagation_rules import _create_all_options
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torch.utils._pytree import tree_flatten, tree_map_only
-from .compute_estimation import estimate_strategy_runtime_cost
+from .compute_estimation import _get_sharded_shape, estimate_strategy_runtime_cost
 from .utils import get_placement_options
 
 
@@ -535,20 +535,8 @@ class ShardingOptimizer:
             for ii in range(vv["num_output_strat"]):
                 data = self.ds[(s_i, 0, ii, 0)]
                 spec = data["inp_strat"]
-                mesh = spec.mesh
                 tensor_shape = spec.tensor_meta.shape
-                # TODO: take dtype into account as well
-                # tensor_dtype = spec.tensor_meta.dtype
-                placements = spec.placements
-                # TODO: find a better heuristic other than
-                # running DTensor
-                new_tensor_shape = list(tensor_shape)
-                for mesh_size, placement in zip(mesh.shape, placements):
-                    if placement.is_shard():
-                        dim = placement.dim
-                        new_tensor_shape[dim] = (
-                            new_tensor_shape[dim] + mesh_size - 1
-                        ) // mesh_size
+                new_tensor_shape = _get_sharded_shape(spec)
                 new_size = math.prod(new_tensor_shape)
                 old_size = math.prod(tensor_shape)
                 elms.append(data["va"] * new_size / old_size)
