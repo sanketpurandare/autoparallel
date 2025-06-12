@@ -1,6 +1,6 @@
 import torch
 from torch.utils._pytree import tree_map_only
-from torch.utils.flop_counter import flop_registry, FlopCounterMode
+from torch.utils.flop_counter import FlopCounterMode
 
 
 def _get_device_tflops(dtype):
@@ -48,13 +48,10 @@ def estimate_strategy_runtime_cost(node, strategy):
     if node.op != "call_function":
         return 0
     # suppose only matmul-like ops
-    if node.target not in {torch.ops.aten.mm.default}:
-        return 0
-
     if not isinstance(node.target, torch._ops.OpOverload):
         return 0
 
-    if node.target.overloadpacket not in flop_registry:
+    if node.target.is_view:
         return 0
 
     args = tree_map_only(torch.fx.Node, lambda x: x.meta["val"], node.args)
@@ -71,6 +68,8 @@ def estimate_strategy_runtime_cost(node, strategy):
                 args[i] = torch.empty(args_shapes[counter], device=arg.device, dtype=arg.dtype)
             counter += 1
 
+    # TODO: maybe cache the flop_counter to avoid recreating it
+    # all the time
     with FlopCounterMode(display=False) as flop_counter:
         out = node.target(*args, **kwargs)
 
@@ -79,49 +78,11 @@ def estimate_strategy_runtime_cost(node, strategy):
     # TODO: fix this
     dtype = strategy.input_specs[0].tensor_meta.dtype
 
+    # TODO: use PyTorch's version once it's giving correct results
     gpu_flops = _get_device_tflops(dtype) * 10 ** 12
 
-    # suppose 50% efficiency
+    # suppose 50% efficiency for the operator
     factor = 1 / 0.5
     compute_time = factor * flops / gpu_flops * 1e6  # us
 
     return compute_time
-
-
-
-def _get_mm_time(strategy):
-    dtype = strategy.input_specs[0].tensor_meta.dtype
-    a_shape = _get_sharded_shape(strategy.input_specs[0])
-    b_shape = _get_sharded_shape(strategy.input_specs[1])
-
-    m, k = a_shape
-    k2, n = b_shape
-    assert k == k2
-    flops = m * n * 2 * k
-
-    gpu_flops = _get_device_tflops(dtype) * 10 ** 12
-
-    factor = 1 / 0.5
-    compute_time = factor * flops / gpu_flops * 1e6  # us
-
-    return compute_time
-
-
-def legacy():
-
-    cost_op = 0
-
-    if node.op != "call_function":
-        return cost_op
-
-    func = node.op
-    if func not in flop_registry:
-        return cost_op
-
-    args = node.args
-    flops = flop_registry[func._overloadpacket]()
-
-    if node.op == "call_function" and node.target == torch.ops.aten.mm.default:
-        cost_op =  _get_mm_time(strategy)
-
-    return cost_op
