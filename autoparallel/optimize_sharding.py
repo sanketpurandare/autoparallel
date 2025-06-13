@@ -100,7 +100,7 @@ class ShardingOptimizer:
                         )
                         ds[(s_i, argi, ss, ii)] = {
                             "va": va,
-                            "cost": comm_cost + compute_cost,
+                            "cost": comm_cost + compute_cost / num_args[s_i],
                             "full_strat": ssi,
                             "out_strat": ssi.output_specs,
                             "inp_strat": ssi.input_specs[argi],
