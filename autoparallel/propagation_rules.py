@@ -11,7 +11,7 @@ import operator
 
 import torch
 from torch.distributed._tensor.placement_types import DTensorSpec, TensorMeta
-from torch.distributed.tensor._op_schema import OpSchema, OpStrategy, PlacementStrategy
+from torch.distributed.tensor._op_schema import OpSchema, OpSpec, OpStrategy
 from torch.distributed.tensor._ops._view_ops import (
     RuntimeSchemaInfo,
     dim_maps,
@@ -93,9 +93,7 @@ def _create_all_options_no_nested_sharding(mesh, shape, tensor_meta=None):
             # print("skipping ", op, c)
             continue
         spec = DTensorSpec.from_dim_map(mesh, op, [], tensor_meta)
-        strats.append(
-            PlacementStrategy(spec, input_specs=[spec], redistribute_cost=[[0.0]])
-        )
+        strats.append(OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]]))
     return OpStrategy(strats)
 
 
@@ -113,9 +111,7 @@ def _create_all_options(mesh, shape, tensor_meta=None, tensor=None):
     strats = []
     for placement in all_options:
         spec = DTensorSpec(mesh, placement, tensor_meta=tensor_meta)
-        strats.append(
-            PlacementStrategy(spec, input_specs=[spec], redistribute_cost=[[0.0]])
-        )
+        strats.append(OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]]))
     return OpStrategy(strats)
 
 
@@ -126,7 +122,7 @@ def getitem_rule(mesh, specs):
     strats = []
     new_inp = OpStrategy(
         [
-            PlacementStrategy(strat.output_specs[index], input_specs=strat.output_specs)
+            OpSpec(strat.output_specs[index], input_specs=strat.output_specs)
             for strat in op_spec.strategies
         ]
     )
@@ -136,8 +132,8 @@ def getitem_rule(mesh, specs):
         redistribute_costs = [generate_redistribute_costs(new_inp, output_specs)]
         # TODO: fix this to take input_specs as argument
         # this will require fixing apply_sharding as well, see other TODO
-        # s = PlacementStrategy(output_specs, input_specs=input_specs)
-        s = PlacementStrategy(output_specs, input_specs=(output_specs,))
+        # s = OpSpec(output_specs, input_specs=input_specs)
+        s = OpSpec(output_specs, input_specs=(output_specs,))
         # s.redistribute_cost = [[0.0]] * len(input_specs)
         # s.redistribute_cost[index] = redistribute_costs
         s.redistribute_cost = redistribute_costs
@@ -176,7 +172,7 @@ def view_rule(mesh, specs):
         )
 
         redistribute_costs = [generate_redistribute_costs(op_spec, input_tgt_spec)]
-        s = PlacementStrategy(
+        s = OpSpec(
             output_spec,
             input_specs=(input_tgt_spec,),
             redistribute_cost=redistribute_costs,
@@ -196,7 +192,7 @@ def alias_rule(mesh, specs):
         input_specs = strat.output_specs
         output_specs = input_specs
         redistribute_costs = [generate_redistribute_costs(op_spec, output_specs)]
-        s = PlacementStrategy(output_specs, input_specs=(input_specs,))
+        s = OpSpec(output_specs, input_specs=(input_specs,))
         s.redistribute_cost = redistribute_costs
         strats.append(s)
     return OpStrategy(strats)
@@ -230,7 +226,7 @@ def unbind_rule(mesh, specs):
         for banned in banned_idxs:
             redistribute_costs[banned] = math.inf
 
-        s = PlacementStrategy(output_specs, input_specs=(input_specs,))
+        s = OpSpec(output_specs, input_specs=(input_specs,))
         s.redistribute_cost = [redistribute_costs]
         strats.append(s)
     return OpStrategy(strats)
@@ -268,7 +264,7 @@ def split_with_sizes_rule(mesh, specs):
         for banned in banned_idxs:
             redistribute_costs[banned] = math.inf
 
-        s = PlacementStrategy(output_specs, input_specs=(input_specs,))
+        s = OpSpec(output_specs, input_specs=(input_specs,))
         s.redistribute_cost = [redistribute_costs]
         strats.append(s)
     return OpStrategy(strats)
@@ -315,7 +311,7 @@ def cat_rule(mesh, specs):
                 redistribute_costs[banned] = math.inf
             all_costs.append(redistribute_costs)
 
-        s = PlacementStrategy(output_spec, input_specs=input_specs)
+        s = OpSpec(output_spec, input_specs=input_specs)
         s.redistribute_cost = all_costs
         strats.append(s)
     return OpStrategy(strats)
@@ -327,10 +323,8 @@ def iota_rule(mesh, specs):
     tensor_meta = _gen_tensor_meta(shape, dtype=torch.int64)
     placement = (Replicate(),) * mesh.ndim
     spec = DTensorSpec(mesh, placement, tensor_meta=tensor_meta)
-    # return OpStrategy([PlacementStrategy(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
-    return OpStrategy(
-        [PlacementStrategy(spec, input_specs=[spec], redistribute_cost=[[0.0]])]
-    )
+    # return OpStrategy([OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
+    return OpStrategy([OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
 
 
 @register_rule(torch.ops.aten.randperm.default)
@@ -339,9 +333,7 @@ def randperm_rule(mesh, specs):
     tensor_meta = _gen_tensor_meta(shape, dtype=torch.int64)
     placement = (Replicate(),) * mesh.ndim
     spec = DTensorSpec(mesh, placement, tensor_meta=tensor_meta)
-    return OpStrategy(
-        [PlacementStrategy(spec, input_specs=[spec], redistribute_cost=[[0.0]])]
-    )
+    return OpStrategy([OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
 
 
 @register_rule(torch.ops.aten.full.default)
@@ -355,9 +347,9 @@ def full_rule(mesh, specs):
     input_placement = (Replicate(),) * mesh.ndim
     spec = DTensorSpec(mesh, placement, tensor_meta=tensor_meta)
     input_spec = DTensorSpec(mesh, input_placement, tensor_meta=tensor_meta)
-    # return OpStrategy([PlacementStrategy(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
+    # return OpStrategy([OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
     return OpStrategy(
-        [PlacementStrategy(spec, input_specs=[input_spec], redistribute_cost=[[0.0]])]
+        [OpSpec(spec, input_specs=[input_spec], redistribute_cost=[[0.0]])]
     )
 
 
@@ -482,7 +474,7 @@ def native_layer_norm_rule(mesh, op_schema):
                 output_target_spec = output_target_spec[0]
 
             output_strategy.strategies.append(
-                PlacementStrategy(
+                OpSpec(
                     output_specs=output_target_spec,
                     input_specs=op_args_target_specs,
                     redistribute_cost=redistribute_costs,
@@ -516,7 +508,7 @@ def split_rule(mesh, op_schema):
         # res.append(o)
         oo.append(o)
         if o.output_spec is not None:
-            s = PlacementStrategy(o.output_spec, input_specs=(ispec,))
+            s = OpSpec(o.output_spec, input_specs=(ispec,))
             s.redistribute_cost = [[math.inf] * len(ss.redistribute_cost[0])]
             # s.redistribute_cost = [[0.0] * len(ss.redistribute_cost[0])]
             s.redistribute_cost[0][i] = 0.0
@@ -558,7 +550,7 @@ def index_rule(mesh, op_schema):
                     mesh, placements=(Replicate(), Replicate())
                 )
             kspc = [x for x in strat[1].childs if x is not None]
-            s = PlacementStrategy(output_specs=ospec, input_specs=[ispec] + idxs_strats)
+            s = OpSpec(output_specs=ospec, input_specs=[ispec] + idxs_strats)
 
             redistribute_costs = [generate_redistribute_costs(specs[0], ospec),] + [
                 generate_redistribute_costs(kk, idxs_strat)
@@ -594,9 +586,7 @@ def index_put_rule(mesh, op_schema):
             ]
             kspc = [x for x in strat[1].childs if x is not None]
             t_strats = [DTensorSpec(mesh, placements=ispec.placements)]
-            s = PlacementStrategy(
-                output_specs=ospec, input_specs=[ispec] + idxs_strats + t_strats
-            )
+            s = OpSpec(output_specs=ospec, input_specs=[ispec] + idxs_strats + t_strats)
 
             redistribute_costs = (
                 [generate_redistribute_costs(specs[0], ospec)]
