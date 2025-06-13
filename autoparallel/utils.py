@@ -34,7 +34,14 @@ def propagate_tensor_meta(op, user_args, out_strat):
         else:
             for ospec, tm in zip(strat.output_specs, new_tensor_meta):
                 if ospec is not None:
-                    ospec.tensor_meta = tm
+                    if ospec.tensor_meta != tm:
+                        # This is overcoming some limitations of the lack of
+                        # tensor_meta for sdpa which returns None
+                        # we should just fix this all across the board
+                        if ospec.tensor_meta is None:
+                            ospec.tensor_meta = tm
+                        else:
+                            assert tm is None
         if strat.input_specs is None:
             assert op in {
                 torch.ops.prims.convert_element_type.default,
