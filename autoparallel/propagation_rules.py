@@ -1,3 +1,8 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
+#
+# This source code is licensed under the BSD license found in the
+# LICENSE file in the root directory of this source tree.
+
 import collections
 import copy
 import itertools
@@ -6,7 +11,7 @@ import operator
 
 import torch
 from torch.distributed._tensor.placement_types import DTensorSpec, TensorMeta
-from torch.distributed.tensor._op_schema import OpSchema, OpStrategy, OpSpec
+from torch.distributed.tensor._op_schema import OpSchema, OpSpec, OpStrategy
 from torch.distributed.tensor._ops._view_ops import (
     RuntimeSchemaInfo,
     dim_maps,
@@ -88,9 +93,7 @@ def _create_all_options_no_nested_sharding(mesh, shape, tensor_meta=None):
             # print("skipping ", op, c)
             continue
         spec = DTensorSpec.from_dim_map(mesh, op, [], tensor_meta)
-        strats.append(
-            OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])
-        )
+        strats.append(OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]]))
     return OpStrategy(strats)
 
 
@@ -108,9 +111,7 @@ def _create_all_options(mesh, shape, tensor_meta=None, tensor=None):
     strats = []
     for placement in all_options:
         spec = DTensorSpec(mesh, placement, tensor_meta=tensor_meta)
-        strats.append(
-            OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])
-        )
+        strats.append(OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]]))
     return OpStrategy(strats)
 
 
@@ -323,9 +324,7 @@ def iota_rule(mesh, specs):
     placement = (Replicate(),) * mesh.ndim
     spec = DTensorSpec(mesh, placement, tensor_meta=tensor_meta)
     # return OpStrategy([OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
-    return OpStrategy(
-        [OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])]
-    )
+    return OpStrategy([OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
 
 
 @register_rule(torch.ops.aten.randperm.default)
@@ -334,9 +333,7 @@ def randperm_rule(mesh, specs):
     tensor_meta = _gen_tensor_meta(shape, dtype=torch.int64)
     placement = (Replicate(),) * mesh.ndim
     spec = DTensorSpec(mesh, placement, tensor_meta=tensor_meta)
-    return OpStrategy(
-        [OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])]
-    )
+    return OpStrategy([OpSpec(spec, input_specs=[spec], redistribute_cost=[[0.0]])])
 
 
 @register_rule(torch.ops.aten.full.default)
@@ -589,9 +586,7 @@ def index_put_rule(mesh, op_schema):
             ]
             kspc = [x for x in strat[1].childs if x is not None]
             t_strats = [DTensorSpec(mesh, placements=ispec.placements)]
-            s = OpSpec(
-                output_specs=ospec, input_specs=[ispec] + idxs_strats + t_strats
-            )
+            s = OpSpec(output_specs=ospec, input_specs=[ispec] + idxs_strats + t_strats)
 
             redistribute_costs = (
                 [generate_redistribute_costs(specs[0], ospec)]
