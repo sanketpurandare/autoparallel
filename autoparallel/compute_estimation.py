@@ -38,9 +38,7 @@ def _get_sharded_shape(spec):
     for mesh_size, placement in zip(mesh.shape, placements):
         if placement.is_shard():
             dim = placement.dim
-            new_tensor_shape[dim] = (
-                new_tensor_shape[dim] + mesh_size - 1
-            ) // mesh_size
+            new_tensor_shape[dim] = (new_tensor_shape[dim] + mesh_size - 1) // mesh_size
     return new_tensor_shape
 
 
@@ -56,7 +54,11 @@ def estimate_strategy_runtime_cost(node, strategy):
 
     args = tree_map_only(torch.fx.Node, lambda x: x.meta["val"], node.args)
     kwargs = tree_map_only(torch.fx.Node, lambda x: x.meta["val"], node.kwargs)
-    fake_mode = next(arg.fake_mode for arg in args if isinstance(arg, torch._subclasses.fake_tensor.FakeTensor))
+    fake_mode = next(
+        arg.fake_mode
+        for arg in args
+        if isinstance(arg, torch._subclasses.fake_tensor.FakeTensor)
+    )
     assert len(kwargs) == 0
     args_shapes = tuple(_get_sharded_shape(spec) for spec in strategy.input_specs)
 
@@ -65,13 +67,15 @@ def estimate_strategy_runtime_cost(node, strategy):
     for i, arg in enumerate(args):
         if isinstance(arg, torch.Tensor):
             with fake_mode:
-                args[i] = torch.empty(args_shapes[counter], device=arg.device, dtype=arg.dtype)
+                args[i] = torch.empty(
+                    args_shapes[counter], device=arg.device, dtype=arg.dtype
+                )
             counter += 1
 
     # TODO: maybe cache the flop_counter to avoid recreating it
     # all the time
     with FlopCounterMode(display=False) as flop_counter:
-        out = node.target(*args, **kwargs)
+        node.target(*args, **kwargs)
 
     flops = flop_counter.get_total_flops()
 
@@ -79,7 +83,7 @@ def estimate_strategy_runtime_cost(node, strategy):
     dtype = strategy.input_specs[0].tensor_meta.dtype
 
     # TODO: use PyTorch's version once it's giving correct results
-    gpu_flops = _get_device_tflops(dtype) * 10 ** 12
+    gpu_flops = _get_device_tflops(dtype) * 10**12
 
     # suppose 50% efficiency for the operator
     factor = 1 / 0.5
