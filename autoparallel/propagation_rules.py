@@ -361,9 +361,9 @@ def full_rule(mesh, specs):
 def native_layer_norm_rule(mesh, op_schema):
     from torch.distributed.tensor._ops._math_ops import (
         Sequence,
-        _replicate_dims_start_at,
         normalize_to_torch_size,
     )
+    from torch.distributed.tensor._ops._pointwise_ops import pointwise_strategy
 
     # mesh = op_schema.get_mesh_from_args()
     # args must be: input, normalized_shape, weight, bias, eps
@@ -388,100 +388,114 @@ def native_layer_norm_rule(mesh, op_schema):
     input_ndim = input_strategy.ndim
     axis = input_ndim - len(normalized_size)
 
-    assert len(normalized_size) == 1, "Only support layernorm with 1d weight for now"
+    output_strategy = pointwise_strategy(op_schema, linearity=False)
 
-    # we use OpStrategy because the output (out, mean, rstd)
-    # should have the same placements
-    seen = set()
-    output_strategy = OpStrategy([])
-    for idx, input_placement_strategy in enumerate(input_strategy.strategies):
-        for weight_src_strat, bias_src_strat in zip(
-            weight_strategy.strategies, bias_strategy.strategies
-        ):
-            # for weight_src_strat in weight_strategy.strategies:
-            # for bias_src_strat in bias_strategy.strategies:
-            weight_src_spec = weight_src_strat.output_spec
-            bias_src_spec = bias_src_strat.output_spec
-            op_args_target_specs = []
-            redistribute_costs = []
-            input_src_spec = input_placement_strategy.output_spec
-
-            key = (input_src_spec, weight_src_spec, bias_src_spec)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            # for the input tensor, we replicate it on the inner dims if necessary
-            # TODO: we can avoid forcing the redistribution once we figure out
-            # how to decompose layer norm
-            input_target_spec = DTensorSpec(
-                mesh=mesh,
-                placements=_replicate_dims_start_at(input_src_spec.placements, axis),
-                tensor_meta=input_src_spec.tensor_meta,
-            )
-            op_args_target_specs.append(input_target_spec)
-            redistribute_costs.append(
-                generate_redistribute_costs(input_strategy, input_target_spec)
-            )
-
-            if weight_strategy is not None:
-                # assert isinstance(weight_strategy, OpStrategy)
-                # weight_src_spec = weight_strategy.strategies[idx].output_spec
-
-                # for the weight tensor, we replicate it on all dims if necessary
-                # TODO: we can avoid forcing the redistribution once we figure out
-                # how to decompose layer norm
-                weight_target_spec = DTensorSpec(
-                    mesh=mesh,
-                    placements=_replicate_dims_start_at(weight_src_spec.placements),
-                    tensor_meta=weight_src_spec.tensor_meta,
-                )
-                op_args_target_specs.append(weight_target_spec)
-                redistribute_costs.append(
-                    generate_redistribute_costs(weight_strategy, weight_target_spec)
-                )
-
-            if bias_strategy is not None:
-                # assert isinstance(bias_strategy, OpStrategy)
-                # bias_src_spec = bias_strategy.strategies[idx].output_spec
-
-                # for the bias tensor, we replicate it on all dims if necessary
-                # TODO: we can avoid forcing the redistribution once we figure out
-                # how to decompose layer norm
-                bias_target_spec = DTensorSpec(
-                    mesh=mesh,
-                    placements=_replicate_dims_start_at(bias_src_spec.placements),
-                    tensor_meta=bias_src_spec.tensor_meta,
-                )
-                op_args_target_specs.append(bias_target_spec)
-                redistribute_costs.append(
-                    generate_redistribute_costs(bias_strategy, bias_target_spec)
-                )
-
+    # now let's remove the cases that are invalid, as they require
+    # reduction on a sharded dimension
+    kept = []
+    for strategy in output_strategy.strategies:
+        is_valid = True
+        for plc in strategy.input_specs[0].placements:
+            if plc.is_shard() and plc.dim >= axis:
+                is_valid = False
+                break
+        if is_valid:
+            output_spec = strategy.output_specs
+            input_spec = strategy.input_specs[0]
+            output_spec.tensor_meta = input_spec.tensor_meta
+            assert output_spec.tensor_meta is not None
+            mesh = strategy.mesh
             # the output spec is the same as input spec
-            shape = input_target_spec.tensor_meta.shape[:-1] + (1,)
+            shape = input_spec.tensor_meta.shape[:axis] + (1,) * len(normalized_size)
             mean_std_tgt_spec = DTensorSpec(
                 mesh=mesh,
-                placements=input_target_spec.placements,
+                placements=output_spec.placements,
                 tensor_meta=_gen_tensor_meta(shape),
             )
             output_target_spec = (
-                input_target_spec,
+                output_spec,
                 mean_std_tgt_spec,
                 mean_std_tgt_spec,
             )
             if len(output_target_spec) == 1:
                 output_target_spec = output_target_spec[0]
+            strategy.output_specs = output_target_spec
+            kept.append(strategy)
 
-            output_strategy.strategies.append(
-                OpSpec(
-                    output_specs=output_target_spec,
-                    input_specs=op_args_target_specs,
-                    redistribute_cost=redistribute_costs,
-                )
+    return OpStrategy(kept)
+
+
+@register_opschema_rule(torch.ops.aten.native_layer_norm_backward.default)
+def native_layer_norm_backward_rule(mesh, op_schema):
+    from torch.distributed.tensor._ops._math_ops import (
+        Sequence,
+        normalize_to_torch_size,
+    )
+    from torch.distributed.tensor._ops._pointwise_ops import pointwise_strategy
+
+    assert len(op_schema.args_schema) == 8
+    (
+        grad_out_strategy,
+        input_strategy,
+        normalized_shape,
+        mean_strategy,
+        rstd_strategy,
+        weight_strategy,
+        bias_strategy,
+        _,
+    ) = op_schema.args_schema
+
+    assert isinstance(input_strategy, OpStrategy)
+    assert isinstance(normalized_shape, (int, Sequence, torch.Size))
+    normalized_size = normalize_to_torch_size(normalized_shape)
+
+    input_ndim = input_strategy.ndim
+    axis = input_ndim - len(normalized_size)
+
+    output_strategy = pointwise_strategy(op_schema, linearity=False)
+
+    # now let's remove the cases that are invalid, as they require
+    # reduction on a sharded dimension
+    kept = []
+    for strategy in output_strategy.strategies:
+        is_valid = True
+        input_spec = strategy.input_specs[1]
+        for plc in input_spec.placements:
+            if plc.is_shard() and plc.dim >= axis:
+                is_valid = False
+                break
+        if is_valid:
+            mesh = strategy.mesh
+            grad_input_spec = DTensorSpec(
+                mesh=mesh,
+                placements=strategy.output_specs.placements,
+                tensor_meta=strategy.output_specs.tensor_meta,
             )
+            weight_spec = strategy.input_specs[4]
+            bias_spec = strategy.input_specs[5]
+            grad_input_spec.tensor_meta = input_spec.tensor_meta
+            assert grad_input_spec.tensor_meta is not None
+            weight_tgt_spec = DTensorSpec(
+                mesh=mesh,
+                placements=weight_spec.placements,
+                tensor_meta=weight_spec.tensor_meta,
+            )
+            bias_tgt_spec = DTensorSpec(
+                mesh=mesh,
+                placements=bias_spec.placements,
+                tensor_meta=bias_spec.tensor_meta,
+            )
+            output_target_spec = (
+                grad_input_spec,
+                weight_tgt_spec,
+                bias_tgt_spec,
+            )
+            if len(output_target_spec) == 1:
+                output_target_spec = output_target_spec[0]
+            strategy.output_specs = output_target_spec
+            kept.append(strategy)
 
-    return output_strategy
+    return OpStrategy(kept)
 
 
 @register_opschema_rule(torch.ops.prims.convert_element_type.default)
