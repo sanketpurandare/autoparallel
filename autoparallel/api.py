@@ -191,10 +191,43 @@ def _get_decomp_table():
     return decomp_table
 
 
+def move_to_fake(model: torch.nn.Module, mode: FakeTensorMode, device: torch.device):
+    """
+    Move the model to the fake mode and move the weights to the fake device
+    """
+
+    def assert_is_meta_tensor(name, t):
+        assert isinstance(t, torch.Tensor) and t.device == torch.device(
+            "meta"
+        ), f"tensor {name} must be on meta device, not {t.device}"
+
+    def _move_to_fake(module, k, device):
+        # lots of ways you might try to swap params with fake params do not work, but this one does
+        submod = module
+        while len(k.split(".")) > 1:
+            submod_name, k = k.split(".", 1)
+            submod = getattr(submod, submod_name)
+        setattr(
+            submod,
+            k,
+            torch.nn.Parameter(mode.from_tensor(getattr(submod, k)).to(device)),
+        )
+
+    with mode:
+        for k, p in model.named_parameters():
+            assert_is_meta_tensor(k, p)
+            _move_to_fake(model, k, device)
+        for k, b in model.named_buffers():
+            assert_is_meta_tensor(k, b)
+            _move_to_fake(model, k, device)
+
+    return model
+
+
 class AutoParallel:
-    def __init__(self, model_fn, input_fn, mesh):
+    def __init__(self, model, input_fn, mesh, device):
         self.fake_mode = FakeTensorMode()
-        self.model_fn = model_fn
+        self.model = move_to_fake(model, self.fake_mode, device)
         self.input_fn = input_fn
         self.mesh = mesh
         self.build_model_graph()
@@ -212,7 +245,6 @@ class AutoParallel:
         # needed because of https://github.com/pytorch/pytorch/issues/148977
         torch.__future__.set_swap_module_params_on_conversion(True)
         with self.fake_mode:
-            self.model = self.model_fn()
             inputs = self.input_fn()
             if not isinstance(inputs, tuple):
                 inputs = (inputs,)
