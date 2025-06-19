@@ -201,25 +201,26 @@ def move_to_fake(model: torch.nn.Module, mode: FakeTensorMode, device: torch.dev
             "meta"
         ), f"tensor {name} must be on meta device, not {t.device}"
 
-    def _move_to_fake(module, k, device):
+    def _move_to_fake(module, k, device, parameter=True):
         # lots of ways you might try to swap params with fake params do not work, but this one does
         submod = module
         while len(k.split(".")) > 1:
             submod_name, k = k.split(".", 1)
             submod = getattr(submod, submod_name)
-        setattr(
-            submod,
-            k,
-            torch.nn.Parameter(mode.from_tensor(getattr(submod, k)).to(device)),
-        )
+
+        fake_tensor = mode.from_tensor(getattr(submod, k)).to(device)
+        if parameter:
+            fake_tensor = torch.nn.Parameter(fake_tensor)
+
+        setattr(submod, k, fake_tensor)
 
     with mode:
         for k, p in model.named_parameters():
             assert_is_meta_tensor(k, p)
-            _move_to_fake(model, k, device)
+            _move_to_fake(model, k, device, parameter=True)
         for k, b in model.named_buffers():
             assert_is_meta_tensor(k, b)
-            _move_to_fake(model, k, device)
+            _move_to_fake(model, k, device, parameter=False)
 
     return model
 
