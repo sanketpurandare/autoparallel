@@ -16,6 +16,8 @@ from autoparallel.api import AutoParallel
 def init_pg():
     world_size = 256
     fake_store = FakeStore()
+    if torch.distributed.is_initialized():
+        return
     torch.distributed.init_process_group(
         "fake", store=fake_store, rank=0, world_size=world_size
     )
@@ -131,7 +133,7 @@ def test_optimization_finds_fsdp_and_ddp_1d(device_mesh_1d, high_mem, model_type
     with torch.device("meta"):
         model = model_fn()
 
-    autop = AutoParallel(model, input_fn, device_mesh_1d, device=device)
+    autop = AutoParallel(model, input_fn, device_mesh_1d)
     autop.add_parameter_memory_constraint(low=low_mem, high=high_mem)
 
     sharding_placement = autop.optimize_placement()
@@ -260,7 +262,7 @@ def test_optimization_finds_fsdp_tp_2d(
     with torch.device("meta"):
         model = model_fn()
 
-    autop = AutoParallel(model, input_fn, device_mesh_2d, device)
+    autop = AutoParallel(model, input_fn, device_mesh_2d)
     autop.add_parameter_memory_constraint(low=low_mem, high=high_mem)
 
     sharding_placement = autop.optimize_placement()

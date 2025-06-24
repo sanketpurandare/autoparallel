@@ -15,6 +15,8 @@ from autoparallel.api import AutoParallel
 def init_pg():
     world_size = 256
     fake_store = FakeStore()
+    if torch.distributed.is_initialized():
+        return
     torch.distributed.init_process_group(
         "fake", store=fake_store, rank=0, world_size=world_size
     )
@@ -52,7 +54,9 @@ def test_from_meta_model(device_mesh_1d):
         return inputs
 
     auto_p = AutoParallel(
-        model, input_fn, device_mesh_1d, device=device_mesh_1d.device_type
+        model,
+        input_fn,
+        device_mesh_1d,
     )
     assert isinstance(
         auto_p.model.get_parameter("linear.weight"), torch._subclasses.FakeTensor
