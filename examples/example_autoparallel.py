@@ -3,6 +3,7 @@
 # This source code is licensed under the BSD license found in the
 # LICENSE file in the root directory of this source tree.
 
+
 import torch
 from torch import nn
 from torch.distributed.tensor.placement_types import Replicate, Shard
@@ -84,18 +85,20 @@ def input_fn():
 # parallelize the model
 with torch.device("meta"):
     model = Block(nheads, dim1, dim2)
-autop = AutoParallel(model, input_fn, mesh)
-autop.add_parameter_memory_constraint(low=None, high=None)
 
-x_sharding = (Shard(0), Replicate())
+with AutoParallel(model, input_fn, mesh) as autop:
+    autop.add_parameter_memory_constraint(low=None, high=None)
 
-autop.add_input_constraints([x_sharding])
-autop.add_output_constraints([x_sharding])
+    x_sharding = (Shard(0), Replicate())
 
-sharding_placement = autop.optimize_placement()
+    autop.add_input_constraints([x_sharding])
+    autop.add_output_constraints([x_sharding])
 
-# AutoParallel produces a module with meta-DTensor parameters that need to be initialized
-parallel_mod = autop.apply_placement(sharding_placement)
+    sharding_placement = autop.optimize_placement()
+
+    # AutoParallel produces a module with meta-DTensor parameters that need to be initialized
+    parallel_mod = autop.apply_placement(sharding_placement)
+
 parallel_mod.to_empty(device="cuda")
 parallel_mod.init_weights()
 
