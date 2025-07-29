@@ -6,6 +6,7 @@
 import copy
 import itertools
 from contextlib import ExitStack
+from typing import Optional
 
 import torch
 from torch._functorch.aot_autograd import (
@@ -17,12 +18,14 @@ from torch._inductor.fx_passes.joint_graph import joint_graph_passes
 from torch._inductor.fx_passes.post_grad import remove_assert_ops
 from torch._logging import trace_structured
 from torch._subclasses import FakeTensorMode
+from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DeviceMesh
 from torch.export._unlift import _assign_attr
 from torch.export.unflatten import _AttrKind
 from torch.nn.utils import stateless
 
 from .apply_sharding import apply_sharding_to_model
+from .cast_parametrization import apply_dtype_cast, canonicalize_mp, set_dtype_cast
 from .optimize_sharding import ShardingOptimizer
 from .utils import _get_device_from_mesh
 
@@ -153,14 +156,28 @@ class AutoParallel:
         The meta model is moved to a fake device based on mesh.device_type.
     """
 
-    def __init__(self, model, input_fn, mesh: DeviceMesh):
+    def __init__(
+        self,
+        model,
+        input_fn,
+        mesh: DeviceMesh,
+        mp_policy: Optional[MixedPrecisionPolicy] = None,
+    ):
         self.stack = ExitStack()
         self.fake_mode = (
             FakeTensorMode()
         )  # TODO: maybe need to reuse the model's fake mode
         device = _get_device_from_mesh(mesh)
-        # TODO: in principle, it shouldn't be necessary to destructively
-        # modify the user model here?  Not sure!
+        if mp_policy is not None:
+            mp_policy = canonicalize_mp(mp_policy)
+        self.mp_policy = mp_policy
+        # copy user model to avoid modifying it in-place
+        # in dtype casting and move_to_fake
+        model = copy.deepcopy(model)
+
+        if self.mp_policy is not None:
+            apply_dtype_cast(model, self.mp_policy)
+
         self.model = move_to_fake(model, self.fake_mode, device)
         self.input_fn = input_fn
         self.mesh = mesh
@@ -177,7 +194,18 @@ class AutoParallel:
         from torch._subclasses.fake_tensor import unset_fake_temporarily
 
         with unset_fake_temporarily():
-            sharding_optimizer = ShardingOptimizer(self.gm, self.mesh)
+            rescale_grad_comm_cost_for_mp = 1.0
+            if self.mp_policy is not None:
+                param_size = self.mp_policy.param_dtype.itemsize
+                reduce_size = self.mp_policy.reduce_dtype.itemsize
+                if param_size != reduce_size:
+                    rescale_grad_comm_cost_for_mp = reduce_size / param_size
+                    # Tiebreak, favoring performing the comms in the largest
+                    # dtype
+                    rescale_grad_comm_cost_for_mp *= 1.1
+            sharding_optimizer = ShardingOptimizer(
+                self.gm, self.mesh, rescale_grad_comm_cost_for_mp
+            )
 
         # makes sharding of params and gradients the same
         sharding_optimizer.add_grad_param_constraints()
@@ -218,9 +246,10 @@ class AutoParallel:
             if not isinstance(inputs, tuple):
                 inputs = (inputs,)
 
-        self.joint_with_descriptors = aot_export_joint_with_descriptors(
-            self.stack, self.model, inputs, decompositions=decomp_table
-        )
+        with set_dtype_cast(True):
+            self.joint_with_descriptors = aot_export_joint_with_descriptors(
+                self.stack, self.model, inputs, decompositions=decomp_table
+            )
         gm = self.joint_with_descriptors.graph_module
 
         # cleanup graph
