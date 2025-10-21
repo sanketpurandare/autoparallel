@@ -1,13 +1,10 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
-#
-# This source code is licensed under the BSD license found in the
-# LICENSE file in the root directory of this source tree.
-
 import time
 from functools import partial
 
 import torch
 
+from autoparallel._passes.graph_multiplex import multiplex_fw_bw_graph
+from autoparallel._passes.split_fsdp_collectives import split_fsdp_prefetch
 from autoparallel._testing.models.llama3 import Transformer, TransformerModelArgs
 from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import (
@@ -16,6 +13,7 @@ from autoparallel.auto_bucketing import (
     simple_fsdp_autobucketing_reordering_pass,
     simplefsdp_autobucketing_config,
 )
+
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Partial, Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
@@ -27,7 +25,7 @@ torch.distributed.init_process_group(
     "fake", store=fake_store, rank=0, world_size=world_size
 )
 
-use_1d_mesh = False
+use_1d_mesh = True
 
 if use_1d_mesh:
     mesh = torch.distributed.device_mesh.init_device_mesh(
@@ -44,48 +42,31 @@ else:
     )
 
 batch_size = 2 * mesh.shape[0]
-seqlen = 2048 * 4
+seq_len = 2048
 vocab_size = 128256
-use_vocab_parallel = not use_1d_mesh
+use_vocab_parallel = False
 device = torch.device("cuda")
-
-model_type = "8b"
 enable_asynctp = False
 
 
-def model_fn():
-    if model_type == "8b":
-        model_args = TransformerModelArgs(
-            dim=4096,
-            n_layers=1,
-            n_heads=32,
-            n_kv_heads=8,
-            ffn_dim_multiplier=1.3,
-            multiple_of=1024,
-            rope_theta=500000,
-            vocab_size=vocab_size,
-            max_seq_len=seqlen,
-        )
-    elif model_type == "70b":
-        model_args = TransformerModelArgs(
-            dim=8192,
-            n_layers=80,
-            n_heads=64,
-            n_kv_heads=8,
-            ffn_dim_multiplier=1.3,
-            multiple_of=4096,
-            rope_theta=500000,
-            vocab_size=vocab_size,
-            max_seq_len=seqlen,
-        )
-    else:
-        raise ValueError(f"{model_type} not available")
+def model_fn() -> Transformer:
+    model_args = TransformerModelArgs(
+        dim=4096,
+        n_layers=1,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.3,
+        multiple_of=1024,
+        rope_theta=500000,
+        vocab_size=vocab_size,
+        max_seq_len=seq_len,
+    )
     m = Transformer(model_args)
     return m
 
 
 def input_fn():
-    x = torch.randint(0, vocab_size, (batch_size, seqlen), device=device)
+    x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
     return x
 
 
@@ -252,6 +233,27 @@ with AutoParallel(
     sharding_placement = autop.optimize_placement(verbose=True)
     print(f"Took {time.time() - t:.2f} s")
     parallel_mod = autop.apply_placement(sharding_placement)
+    multiplex_graph = True
+    if multiplex_graph:
+        f_gm = autop.fw_module
+        b_gm = autop.bw_module
+        print("Original Fwd Graph:")
+        print(f_gm.graph)
+        print("Original Bwd Graph:")
+        print(b_gm.graph)
+        prefetch_f_gm, main_f_gm = split_fsdp_prefetch(f_gm)
+        print("Main Fwd Graph:")
+        print(main_f_gm.graph)
+        print("Prefetch Fwd Graph:")
+        print(prefetch_f_gm.graph)
+        prefetch_b_gm, main_b_gm = split_fsdp_prefetch(b_gm)
+        print("Main Bwd Graph:")
+        print(main_b_gm.graph)
+        print("Prefetch Bwd Graph:")
+        print(prefetch_b_gm.graph)
+        multiplexed_gm = multiplex_fw_bw_graph(main_f_gm, main_b_gm)
+        print("Multiplexed Graph:")
+        print(multiplexed_gm.graph)
 
 # run weight init on our sharded DTensor params
 parallel_mod.to_empty(device="cuda")
@@ -262,7 +264,7 @@ x = (
     torch.randint(
         0,
         vocab_size,
-        (batch_size // mesh.shape[0], seqlen),
+        (batch_size // mesh.shape[0], seq_len),
         device=torch.device("cuda"),
     ),
 )
