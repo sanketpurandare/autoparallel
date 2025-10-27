@@ -362,12 +362,20 @@ class MoE(nn.Module):
         assert self.use_shared_experts, "Shared experts must be enabled"
         out, num_tokens_per_expert = _moe_forward(
             x,
-            self.router,
+            self.gate,
             self.expert_bias,
-            self.reorderer,
+            self.w1,
+            self.w2,
+            self.w3,
+            self.shared_w1,
+            self.shared_w2,
+            self.shared_w3,
+            self.top_k,
+            self.num_experts,
+            self.score_func,
+            self.route_norm,
+            self.route_scale,
             self.score_before_experts,
-            self.experts,
-            self.shared_experts,
         )
 
         # HOPs don't support buffer mutations, keep this outside
