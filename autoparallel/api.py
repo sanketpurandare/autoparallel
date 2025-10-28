@@ -26,6 +26,7 @@ from torch.distributed.tensor import DeviceMesh
 from torch.export._trace import _restore_state_dict
 from torch.export._unlift import _assign_attr
 from torch.export.unflatten import _AttrKind
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .activation_checkpointing import ac_joint_pass
 from .apply_sharding import apply_sharding_to_model
@@ -197,12 +198,14 @@ class AutoParallel:
         enable_ac: bool = True,
         # None means 'auto'
         ac_stage_size_in_GiB: Optional[Union[float, str]] = "auto",
+        dynamic: bool = False,
         **kwargs,
     ):
         self.stack = ExitStack()
         self.fake_mode = (
             FakeTensorMode()
         )  # TODO: maybe need to reuse the model's fake mode
+        # self.fake_mode.allow_scalar_outputs = True
         device = _get_device_from_mesh(mesh)
         if mp_policy is not None:
             mp_policy = canonicalize_mp(mp_policy)
@@ -226,6 +229,10 @@ class AutoParallel:
         self.compiler_fn = compile_fx_inner if compile else boxed_nop_preserve_node_meta
         self.enable_ac = enable_ac
         self.ac_stage_size_in_GiB = ac_stage_size_in_GiB
+
+        if dynamic:
+            self.fake_mode.shape_env = ShapeEnv()
+            self.fake_mode.static_shapes = False
 
         # NB: rest of the construction happens in __enter__
         self.active = False
