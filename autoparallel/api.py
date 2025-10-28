@@ -6,16 +6,29 @@
 import copy
 import itertools
 import warnings
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager, ExitStack
 from types import MethodType
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
+from torch._functorch._aot_autograd.graph_compile import (
+    _aot_stage2a_partition,
+    _aot_stage2b_bw_compile,
+    _aot_stage2b_fw_compile,
+    _apply_tensorify_python_scalars,
+)
 from torch._functorch.aot_autograd import (
     aot_compile_joint_with_descriptors,
     aot_export_joint_with_descriptors,
+    AOTConfig,
+    AOTDispatchCompiler,
+    AOTGraphCapture,
+    AOTState,
     boxed_nop_preserve_node_meta,
+    default_partition,
+    JointWithDescriptors,
+    ViewAndMutationMeta,
 )
 from torch._inductor.compile_fx import compile_fx_inner
 from torch._inductor.decomposition import select_decomp_table
@@ -121,7 +134,7 @@ def move_to_fake(model: torch.nn.Module, mode: FakeTensorMode, device: torch.dev
 # can patch the verification logic.
 @contextmanager
 def monkey_patch_export_verifier():
-    from torch._export.verifier import SpecViolationError, Verifier, final
+    from torch._export.verifier import final, SpecViolationError, Verifier
 
     prior = Verifier._check_graph_module
 
@@ -180,6 +193,92 @@ def _export(model: torch.nn.Module, inputs: tuple[Any]) -> torch.nn.Module:
         return gm
 
 
+# Extracted parts from:
+# https://github.com/pytorch/pytorch/blob/d049ed2cb1619c44279cb716b8a1d94e4df3b372/torch/_functorch/aot_autograd.py
+# https://github.com/pytorch/pytorch/blob/ee7434be822cf6e75b4566d8159f550ee233d8ae/torch/_functorch/_aot_autograd/graph_compile.py#L1875
+
+
+def _aot_compile_partition_joint_with_descriptors(
+    jd: JointWithDescriptors,
+    *,
+    partition_fn: Callable = default_partition,
+    fw_compiler: Optional[AOTDispatchCompiler] = boxed_nop_preserve_node_meta,
+    bw_compiler: Optional[AOTDispatchCompiler] = boxed_nop_preserve_node_meta,
+) -> tuple[torch.fx.GraphModule, torch.fx.GraphModule, int, int, list[int], list[Any]]:
+    aot_state: AOTState = jd._aot_state
+    aot_graph_capture: AOTGraphCapture = jd._aot_graph_capture
+    # Update the AOTState with the provided compilers
+    aot_state.aot_config.partition_fn = partition_fn
+    aot_state.aot_config.fw_compiler = fw_compiler
+    aot_state.aot_config.bw_compiler = bw_compiler
+    aot_state.aot_config.inference_compiler = fw_compiler
+
+    fx_g: torch.fx.GraphModule = aot_graph_capture.graph_module
+    maybe_subclass_meta: Any = aot_graph_capture.maybe_subclass_meta
+    fw_metadata: ViewAndMutationMeta = aot_state.fw_metadata
+    aot_config: AOTConfig = aot_state.aot_config
+
+    # AOTAutogradStage2a: Partition the graph into forward and backward graphs and
+    # return the some metadata about the partitioning.
+
+    _apply_tensorify_python_scalars(fx_g)
+
+    (
+        fw_module,
+        bw_module,
+        num_fw_outs_saved_for_bw,
+        num_symints_saved_for_bw,
+        _indices_of_inps_to_detach,
+        adjusted_flat_args,
+    ) = _aot_stage2a_partition(
+        fx_g,
+        aot_graph_capture.updated_flat_args,
+        maybe_subclass_meta,
+        fw_metadata,
+        aot_config,
+    )
+
+    # AOTAutogradStage2b: Compile the forward and backward graphs into boxed functions
+    # (That take in the args as lists so that after assigning the values to the placeholders the args can be cleared,
+    # this prevents holding references to the tensors).
+    # This also installs some pre_compile and post_compile wrappers to the compiler functions.
+    # In particular, for the forward graph
+    #   Precompile Wrappers:
+    #       - FakifiedOutWrapper
+    #       - FunctionalizedRngRuntimeWrapper
+    #   Post Compile Wrappers:
+    #
+    #       - SymNodeIntWrapper
+
+    fwd_output_strides, compiled_fw_func = _aot_stage2b_fw_compile(
+        fw_module,
+        adjusted_flat_args,
+        maybe_subclass_meta,
+        fw_metadata,
+        num_fw_outs_saved_for_bw,
+        aot_config,
+    )
+
+    lazy_backward_info, compiled_bw_func = _aot_stage2b_bw_compile(
+        bw_module,
+        maybe_subclass_meta,
+        fw_metadata,
+        fwd_output_strides,
+        num_symints_saved_for_bw,
+        aot_config,
+    )
+    # Skipping the caching logic as we don't need it for now
+
+    return (
+        fw_module,
+        bw_module,
+        num_fw_outs_saved_for_bw,
+        num_symints_saved_for_bw,
+        _indices_of_inps_to_detach,
+        adjusted_flat_args,
+    )
+
+
 class AutoParallel:
     """
     Args:
@@ -197,6 +296,7 @@ class AutoParallel:
         enable_ac: bool = True,
         # None means 'auto'
         ac_stage_size_in_GiB: Optional[Union[float, str]] = "auto",
+        reshard_after_forward: bool = True,
         **kwargs,
     ):
         self.stack = ExitStack()
@@ -226,6 +326,7 @@ class AutoParallel:
         self.compiler_fn = compile_fx_inner if compile else boxed_nop_preserve_node_meta
         self.enable_ac = enable_ac
         self.ac_stage_size_in_GiB = ac_stage_size_in_GiB
+        self.reshard_after_forward = reshard_after_forward
 
         # NB: rest of the construction happens in __enter__
         self.active = False
@@ -388,7 +489,9 @@ class AutoParallel:
 
         return self.sharding_placement
 
-    def apply_placement(self, sharding_placement=None):
+    def _apply_placement_common(
+        self, sharding_placement=None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         self._assert_entered()
 
         if sharding_placement is None:
@@ -439,7 +542,10 @@ class AutoParallel:
         )
 
         if self.enable_ac:
-            ac_joint_pass(parallel_gm.graph, self.ac_stage_size_in_GiB)
+            ac_joint_pass(
+                parallel_gm.graph,
+                self.ac_stage_size_in_GiB,
+            )
         # now rename input/param/tangent/output/grad_param/grad_input nodes following
         # our convention
         # apply_node_renaming(
@@ -467,14 +573,17 @@ class AutoParallel:
                 torch.ops._c10d_functional.wait_tensor.default
             )
 
-        parallel_model_fn, fw_module, bw_module = aot_compile_joint_with_descriptors(
+        return (sharded_param_dict, sharded_buffer_dict)
+
+    def apply_placement(self, sharding_placement=None) -> torch.nn.Module:
+        sharded_param_dict, sharded_buffer_dict = self._apply_placement_common(
+            sharding_placement
+        )
+        self.parallel_model_fn = parallel_model_fn = aot_compile_joint_with_descriptors(
             self.joint_with_descriptors,
             fw_compiler=self.compiler_fn,
             bw_compiler=self.compiler_fn,
         )
-        self.parallel_model_fn = parallel_model_fn
-        self.fw_module = fw_module
-        self.bw_module = bw_module
 
         # TODO: this probably belongs in the AOTAutograd API
         # TODO: pytree handling
@@ -527,3 +636,43 @@ class AutoParallel:
             )
 
         return self.parallel_model
+
+    def apply_pp_placement(self, sharding_placement=None):
+        sharded_param_dict, sharded_buffer_dict = self._apply_placement_common(
+            sharding_placement
+        )
+        self.fw_module, self.bw_module = _aot_compile_partition_joint_with_descriptors(
+            self.joint_with_descriptors,
+            fw_compiler=self.compiler_fn,
+            bw_compiler=self.compiler_fn,
+        )
+
+        class AutoParallelPPStage:
+            stage_sharded_param_dict: dict[str, torch.nn.Parameter] = sharded_param_dict
+            stage_sharded_buffer_dict: dict[str, torch.nn.Buffer] = sharded_buffer_dict
+            stage_joint_with_descriptors: JointWithDescriptors = (
+                self.joint_with_descriptors
+            )
+            stage_compiler_fn: Callable = self.compiler_fn
+
+        self.pp_stage = AutoParallelPPStage()
+
+        # TODO(sanketpurandare): Handle init_weights function properly
+
+        # # Right now we require a convention that the user model provides an init_weights method,
+        # # although we could snoop for other methods too.
+        # hook_params_setters(self.init_weights_model, self.parallel_model)
+        # if hasattr(self.model, "init_weights"):
+
+        #     def init_weights(_self, *args, **kwargs):
+        #         # this is now a deep-fake-copy of orig mod, so we don't have to use reparametrize
+        #         return self.init_weights_model.init_weights(*args, **kwargs)
+
+        #     # assign an init_weights method onto the output mod.
+        #     # all it does is sneakily run the original user mod's init_weights method,
+        #     # but with our new DTensor sharded params attached to the user module.
+        #     self.parallel_model.init_weights = MethodType(
+        #         init_weights, self.parallel_model
+        #     )
+
+        return self.pp_stage

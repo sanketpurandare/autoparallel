@@ -347,8 +347,13 @@ def _apply_ac_policy(joint_graph: torch.fx.Graph, save_list: set[torch.ops.OpOve
     _mark_nodes_as_must_save(must_save_nodes)
 
 
-def ac_joint_pass(graph: torch.fx.Graph, ac_stage_size_in_GiB: float = 2.0):
-    force_recompute_fsdp_all_gather(graph)
+def ac_joint_pass(
+    graph: torch.fx.Graph,
+    ac_stage_size_in_GiB: Optional[Union[float, str]] = "auto",
+    reshard_after_forward: bool = True,
+):
+    if reshard_after_forward:
+        force_recompute_fsdp_all_gather(graph)
     mark_nodes_as_must_save_to_stage_recomputation(
         graph, stage_size_in_GiB=ac_stage_size_in_GiB
     )
