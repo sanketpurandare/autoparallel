@@ -198,6 +198,7 @@ class AutoParallel:
         enable_ac: bool = True,
         # None means 'auto'
         ac_stage_size_in_GiB: Optional[Union[float, str]] = "auto",
+        reshard_after_forward: bool = True,
         dynamic: bool = False,
         **kwargs,
     ):
@@ -229,6 +230,7 @@ class AutoParallel:
         self.compiler_fn = compile_fx_inner if compile else boxed_nop_preserve_node_meta
         self.enable_ac = enable_ac
         self.ac_stage_size_in_GiB = ac_stage_size_in_GiB
+        self.reshard_after_forward = reshard_after_forward
 
         if dynamic:
             self.fake_mode.shape_env = ShapeEnv()
@@ -395,7 +397,7 @@ class AutoParallel:
 
         return self.sharding_placement
 
-    def apply_placement(self, sharding_placement=None):
+    def _apply_placement_common(self, sharding_placement):
         self._assert_entered()
 
         if sharding_placement is None:
@@ -446,7 +448,9 @@ class AutoParallel:
         )
 
         if self.enable_ac:
-            ac_joint_pass(parallel_gm.graph, self.ac_stage_size_in_GiB)
+            ac_joint_pass(
+                parallel_gm.graph, self.ac_stage_size_in_GiB, self.reshard_after_forward
+            )
         # now rename input/param/tangent/output/grad_param/grad_input nodes following
         # our convention
         # apply_node_renaming(
@@ -473,6 +477,45 @@ class AutoParallel:
             torch.fx.node._side_effectful_functions.remove(
                 torch.ops._c10d_functional.wait_tensor.default
             )
+        return (
+            sharded_param_dict,
+            sharded_buffer_dict,
+        )
+
+    def _register_params_and_init_weights(
+        self, sharded_param_dict, sharded_buffer_dict
+    ):
+
+        # We construct an unflattened structure on parallel_mod,
+        # e.g. _assign_attr(v, parallel_model, k="layers.0.weight") will literally
+        # create empty nn.Modules recursively and then stash 'v' so it shows up in the right spot
+        for k, v in sharded_param_dict.items():
+            _assign_attr(v, self.parallel_model, k, attr_kind=_AttrKind.PARAMETER)
+
+        for k, v in sharded_buffer_dict.items():
+            _assign_attr(v, self.parallel_model, k, attr_kind=_AttrKind.BUFFER)
+
+        # Right now we require a convention that the user model provides an init_weights method,
+        # although we could snoop for other methods too.
+        hook_params_setters(self.init_weights_model, self.parallel_model)
+        if hasattr(self.model, "init_weights"):
+
+            def init_weights(_self, *args, **kwargs):
+                # this is now a deep-fake-copy of orig mod, so we don't have to use reparametrize
+                return self.init_weights_model.init_weights(*args, **kwargs)
+
+            # assign an init_weights method onto the output mod.
+            # all it does is sneakily run the original user mod's init_weights method,
+            # but with our new DTensor sharded params attached to the user module.
+            self.parallel_model.init_weights = MethodType(
+                init_weights, self.parallel_model
+            )
+
+    def apply_placement(self, sharding_placement=None):
+
+        sharded_param_dict, sharded_buffer_dict = self._apply_placement_common(
+            sharding_placement
+        )
 
         self.parallel_model_fn = parallel_model_fn = aot_compile_joint_with_descriptors(
             self.joint_with_descriptors,
@@ -504,30 +547,82 @@ class AutoParallel:
                 return out
 
         self.parallel_model = AutoParallelModule()
+        self._register_params_and_init_weights(sharded_param_dict, sharded_buffer_dict)
+        return self.parallel_model
 
-        # We construct an unflattened structure on parallel_mod,
-        # e.g. _assign_attr(v, parallel_model, k="layers.0.weight") will literally
-        # create empty nn.Modules recursively and then stash 'v' so it shows up in the right spot
-        for k, v in sharded_param_dict.items():
-            _assign_attr(v, self.parallel_model, k, attr_kind=_AttrKind.PARAMETER)
+    def apply_placement_pp(self, sharding_placement=None) -> torch.nn.Module:
+        sharded_param_dict, sharded_buffer_dict = self._apply_placement_common(
+            sharding_placement
+        )
+        from autoparallel._passes.graph_partition import (
+            partition_joint_with_descriptors,
+        )
 
-        for k, v in sharded_buffer_dict.items():
-            _assign_attr(v, self.parallel_model, k, attr_kind=_AttrKind.BUFFER)
+        (
+            fw_module,
+            bw_module,
+            num_user_outputs,
+            num_mutate_inputs,
+            num_fw_outs_saved_for_bw,
+            num_symints_saved_for_bw,
+            _indices_of_inps_to_detach,
+            adjusted_flat_args,
+        ) = partition_joint_with_descriptors(self.joint_with_descriptors)
 
-        # Right now we require a convention that the user model provides an init_weights method,
-        # although we could snoop for other methods too.
-        hook_params_setters(self.init_weights_model, self.parallel_model)
-        if hasattr(self.model, "init_weights"):
+        class AutoParallelPPStage(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, *args):
+                fw_module = args[-2]
+                ctx.bw_module = args[-1]
+                fw_args = list(args[:-2])
+                fw_outputs = torch.fx.Interpreter(fw_module).boxed_run(fw_args)
+                num_inner_fwd_outputs = num_mutate_inputs + num_user_outputs
+                saved_intermediates = fw_outputs[num_inner_fwd_outputs:]
+                num_tensors_for_backward = (
+                    len(saved_intermediates) - num_symints_saved_for_bw
+                )
+                tensors_to_save = saved_intermediates[:num_tensors_for_backward]
+                non_tensors_to_save = saved_intermediates[num_tensors_for_backward:]
+                ctx.save_for_backward(*tensors_to_save)
+                ctx.non_tensors = non_tensors_to_save
 
-            def init_weights(_self, *args, **kwargs):
-                # this is now a deep-fake-copy of orig mod, so we don't have to use reparametrize
-                return self.init_weights_model.init_weights(*args, **kwargs)
+                user_outputs = fw_outputs[num_mutate_inputs:num_inner_fwd_outputs]
+                return user_outputs
 
-            # assign an init_weights method onto the output mod.
-            # all it does is sneakily run the original user mod's init_weights method,
-            # but with our new DTensor sharded params attached to the user module.
-            self.parallel_model.init_weights = MethodType(
-                init_weights, self.parallel_model
-            )
+            @staticmethod
+            def backward(ctx, *tangents):
+                bw_args = [*ctx.saved_tensors, *ctx.non_tensors, *tangents]
+                bw_outputs = torch.fx.Interpreter(ctx.bw_module).boxed_run(bw_args)
+                result = bw_outputs + (None,) * 2
+                return result
 
+        class AutoParallelPPModule(torch.nn.Module):
+            def __init__(self, fw_module, bw_module):
+                super().__init__()
+                self.fw_module = fw_module
+                self.bw_module = bw_module
+
+            def forward(self, *args):
+                # NB: don't close over the parameters/buffers, as the user may
+                # reassign the module!
+                # prepare_aot_module_simplified, this seems like an API gap
+                params_and_buffers = [
+                    v.to_local()
+                    for k, v in itertools.chain(
+                        dict(self.named_parameters(remove_duplicate=False)).items(),
+                        dict(self.named_buffers(remove_duplicate=False)).items(),
+                    )
+                ]
+                boxed_args = [
+                    *params_and_buffers,
+                    *args,
+                    self.fw_module,
+                    self.bw_module,
+                ]
+                del params_and_buffers
+                out = AutoParallelPPStage.apply(*boxed_args)
+                return out
+
+        self.parallel_model = AutoParallelPPModule(fw_module, bw_module)
+        self._register_params_and_init_weights(sharded_param_dict, sharded_buffer_dict)
         return self.parallel_model
