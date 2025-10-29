@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import torch
 from torch._functorch._aot_autograd.graph_compile import (
@@ -7,14 +7,13 @@ from torch._functorch._aot_autograd.graph_compile import (
 )
 from torch._functorch.aot_autograd import (
     AOTConfig,
-    AOTDispatchCompiler,
     AOTGraphCapture,
     AOTState,
-    boxed_nop_preserve_node_meta,
-    default_partition,
     JointWithDescriptors,
     OutputType,
     ViewAndMutationMeta,
+    boxed_nop_preserve_node_meta,
+    default_partition,
 )
 
 
@@ -22,8 +21,8 @@ def partition_joint_with_descriptors(
     jd: JointWithDescriptors,
     *,
     partition_fn: Callable = default_partition,
-    fw_compiler: Optional[AOTDispatchCompiler] = boxed_nop_preserve_node_meta,
-    bw_compiler: Optional[AOTDispatchCompiler] = boxed_nop_preserve_node_meta,
+    fw_compiler: Callable = boxed_nop_preserve_node_meta,
+    bw_compiler: Callable = boxed_nop_preserve_node_meta,
 ) -> tuple[
     torch.fx.GraphModule, torch.fx.GraphModule, int, int, int, int, list[int], list[Any]
 ]:
