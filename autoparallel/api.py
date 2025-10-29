@@ -591,7 +591,7 @@ class AutoParallel:
 
             @staticmethod
             def backward(ctx, *tangents):
-                bw_args = [*ctx.saved_tensors, *ctx.non_tensors, *tangents]
+                bw_args = [*ctx.non_tensors, *ctx.saved_tensors, *tangents]
                 bw_outputs = torch.fx.Interpreter(ctx.bw_module).boxed_run(bw_args)
                 result = bw_outputs + (None,) * 2
                 return result

@@ -6,14 +6,14 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-
-from autoparallel.collectives import all_to_all, axis_size, local_map
 from torch import nn
 
 # from torchtitan.distributed.expert_parallel import expert_parallel
 from torch.distributed.tensor import DeviceMesh, DTensor
 from torch.distributed.tensor.placement_types import Replicate, Shard
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from autoparallel.collectives import all_to_all, axis_size, local_map
 
 
 # parallelized kernel
