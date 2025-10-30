@@ -6,6 +6,7 @@
 from typing import cast
 
 import torch.distributed.tensor._dtensor_spec as dtensor_spec
+from torch._prims_common import check_contiguous_sizes_strides
 from torch.distributed.tensor._collective_utils import (
     MeshTopoInfo,
     allgather_cost,
@@ -70,10 +71,15 @@ def redistribute_cost(
     # 3. allreduce 4. reduce_scatter
     curr_placements = [current_spec.placements[i] for i in order]
     tgt_placements = [target_spec.placements[i] for i in order]
+    is_contiguous: bool = check_contiguous_sizes_strides(
+        current_spec.shape, current_spec.stride
+    )
     for i, current, target in zip(order, curr_placements, tgt_placements):
         if current == target:
             continue
         num_devices_on_mesh_dim = mesh_topo.mesh_dim_devices[i]
+        if not is_contiguous:
+            cost += compute_read_write_time(comm_bytes_gb * 2 * 1024**3)
         if current.is_shard() and target.is_replicate():
             current = cast(Shard, current)
             # allgather gives larger comm bytes
@@ -95,10 +101,6 @@ def redistribute_cost(
             cost += all_to_all_cost(comm_bytes_gb, mesh_topo, i)  # us
 
             num_copies = 0
-            is_contiguous = False
-            if not is_contiguous:
-                num_copies += 1
-
             if current.dim != 0:
                 num_copies += 1
 
@@ -132,6 +134,11 @@ def redistribute_cost(
             # ban replicate -> partial as it does not make sense to perform
             # this redistribute in our case
             return float("inf")
+
+        # once we redistribute across one mesh dim, assume the output
+        # is now contiguous. This is generally the case for most operations,
+        # except when we fuse nd collectives into a 1d collective.
+        is_contiguous = True
 
     return cost
 
