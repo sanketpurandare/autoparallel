@@ -272,9 +272,9 @@ def expert_parallel(func: Callable) -> Callable:
 
         experts_per_ep_rank = w1.shape[0]
         num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
-        assert (
-            num_ep_ranks == 64
-        ), f"{num_ep_ranks}, {experts_per_ep_rank}, num_tokens_per_expert.shape: {num_tokens_per_expert.shape}, x={x.ndim}, w={w1.shape}"
+        # assert (
+        #     num_ep_ranks == 64
+        # ), f"{num_ep_ranks}, {experts_per_ep_rank}, num_tokens_per_expert.shape: {num_tokens_per_expert.shape}, x={x.ndim}, w={w1.shape}"
 
         # Make sure max_len of permuted token indicies is divisible by TOKEN_GROUP_ALIGN_SIZE_M,
         # by padding it to the nearest multiple of TOKEN_GROUP_ALIGN_SIZE_M.
@@ -680,12 +680,11 @@ def local_mapped_region(
     experts_w3: torch.Tensor,
     experts_w2: torch.Tensor,
     out: torch.Tensor,
+    top_k: int,
+    num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     axis_name = "ep"
     # assert False, f"{x.shape}, {selected_experts_indices.shape}, {top_scores.shape}, {out.shape}"
-
-    top_k = 6
-    num_experts = 64
 
     dim = x.shape[-1]
 
@@ -850,18 +849,18 @@ def _(
 
 
 def _moe_forward(
-    x,
-    router_gate_weight,
-    expert_bias,
-    experts_w1,
-    experts_w3,
-    experts_w2,
-    shared_w1,
-    shared_w3,
-    shared_w2,
-    router,  # None
-    reorderer,  # None
-    mesh,  # None
+    x: torch.Tensor,
+    router_gate_weight: torch.Tensor,
+    expert_bias: Optional[torch.Tensor],
+    experts_w1: torch.Tensor,
+    experts_w3: torch.Tensor,
+    experts_w2: torch.Tensor,
+    shared_w1: torch.Tensor,
+    shared_w3: torch.Tensor,
+    shared_w2: torch.Tensor,
+    router: TokenChoiceTopKRouter,  # None
+    reorderer: TokenReorderer,  # None
+    mesh: Optional[DeviceMesh],  # None
 ):
     # x: 64, 2048, 256
     bs, slen, dim = x.shape
@@ -926,6 +925,8 @@ def _moe_forward(
         (Replicate(), Shard(0)),
         (Replicate(), Shard(0)),
         (Shard(0), Shard(0)),
+        None,
+        None,
     )
 
     # assert False, f"{x.shape}, {selected_experts_indices.shape}, {top_scores.shape}, {out.shape}"
@@ -937,7 +938,17 @@ def _moe_forward(
         redistribute_inputs=True,
         in_grad_placements=None,
         device_mesh=mesh,
-    )(selected_experts_indices, top_scores, x, experts_w1, experts_w3, experts_w2, out)
+    )(
+        selected_experts_indices,
+        top_scores,
+        x,
+        experts_w1,
+        experts_w3,
+        experts_w2,
+        out,
+        router.top_k,
+        router.num_experts,
+    )
     # assert False, f"there: {out.shape}, {num_tokens_per_expert.shape}"
 
     ######################################################
@@ -1046,7 +1057,7 @@ class MoE(nn.Module):
             shared_w2,
             self.router,  # None
             self.reorderer,  # None
-            self.mesh,
+            self.mesh,  # None
         )
 
         # HOPs don't support buffer mutations, keep this outside
