@@ -89,7 +89,7 @@ def build_pipeline_schedule(
 def run_test(fake_evaluate: bool = True):
     if not fake_evaluate:
         pp_degree = 2
-        dp_mod_ep_degree = 1
+        dp_mod_ep_degree = 2
         ep_degree = 2
     else:
         pp_degree = 4
@@ -123,7 +123,7 @@ def run_test(fake_evaluate: bool = True):
         ), "run with torchrun --standalone --nproc-per-node 8"
         assert (
             int(os.getenv("WORLD_SIZE")) == world_size
-        ), "Need at least 4 GPUs for real evaluation"
+        ), "Need at least 8 GPUs for real evaluation"
         local_rank = int(os.getenv("LOCAL_RANK"))
         device = torch.device(f"cuda:{local_rank}")
         torch.distributed.init_process_group(backend="nccl")
@@ -280,52 +280,19 @@ def run_test(fake_evaluate: bool = True):
             requires_grad=True,
         )
 
-    if fake_evaluate:
-        # Step 1. Construct the logical pipeline stages
-        with torch.device("meta"):
-            stage0 = DeepSeekV3Stage0(embed, layers[0], config)
-            stage1 = DeepSeekV3StageI(layers[1], config)
-            stage2 = DeepSeekV3StageI(layers[2], config)
-            stage3 = DeepSeekV3StageI(layers[3], config)
-            stage4 = DeepSeekV3StageI(layers[4], config)
-            stage5 = DeepSeekV3StageI(layers[5], config)
-            stage6 = DeepSeekV3StageI(layers[6], config)
-            stage7 = DeepSeekV3StageN(layers[7], norm, output, config)
-            virtual_pp_stages = [
-                stage0,
-                stage1,
-                stage2,
-                stage3,
-                stage4,
-                stage5,
-                stage6,
-                stage7,
-            ]
-        # Step 2. Assign each logical stage(s) to pp ranks for Interleaved1F1B schedule
-        pp_rank_to_stage_indices: dict[int, list[int]] = {
-            0: [0, 4],
-            1: [1, 5],
-            2: [2, 6],
-            3: [3, 7],
-        }
-    else:
-        # Step 1. Construct the logical pipeline stages
-        with torch.device("meta"):
-            stage0 = DeepSeekV3Stage0(embed, layers[0], config)
-            stage1 = DeepSeekV3StageI(layers[1], config)
-            stage2 = DeepSeekV3StageI(layers[2], config)
-            stage3 = DeepSeekV3StageN(layers[3], norm, output, config)
-            virtual_pp_stages = [
-                stage0,
-                stage1,
-                stage2,
-                stage3,
-            ]
-        # Step 2. Assign each logical stage(s) to pp ranks for Interleaved1F1B schedule
-        pp_rank_to_stage_indices: dict[int, list[int]] = {
-            0: [0, 2],
-            1: [1, 3],
-        }
+    # Step 1. Construct the logical pipeline stages
+    with torch.device("meta"):
+        virtual_pp_stages = [DeepSeekV3Stage0(embed, layers[0], config)]
+        for i in range(1, total_pp_stages - 1):
+            virtual_pp_stages.append(DeepSeekV3StageI(layers[i], config))
+        virtual_pp_stages.append(
+            DeepSeekV3StageN(layers[total_pp_stages - 1], norm, output, config)
+        )
+    # Step 2. Assign each logical stage(s) to pp ranks for Interleaved1F1B schedule
+    pp_rank_to_stage_indices: dict[int, list[int]] = {
+        rank: [rank + i * pp_degree for i in range(stages_per_rank)]
+        for rank in range(pp_degree)
+    }
     assert len(pp_rank_to_stage_indices) == pp_degree
     for stages in pp_rank_to_stage_indices.values():
         assert len(stages) * pp_degree == len(virtual_pp_stages)
@@ -444,7 +411,7 @@ def run_test(fake_evaluate: bool = True):
             ),
             output_args=(
                 shape_inference_output_fn_last_stage()
-                if pp_stage_idx == 7
+                if pp_stage_idx == (len(virtual_pp_stages) - 1)
                 else shape_inference_input_fn_after_first_stage()
             ),
             group=world_mesh.get_group("pp"),
