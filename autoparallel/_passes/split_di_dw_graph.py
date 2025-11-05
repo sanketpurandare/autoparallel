@@ -191,7 +191,7 @@ def _extract_fwd_bwd_modules(
 
 # TODO: in theory we can infer num_weight_gradients from the graph metadata directly
 def split_di_dw_graph(
-    bw_gm_old: fx.GraphModule, *, num_weight_gradients
+    bw_gm_old: fx.GraphModule, *, num_weight_gradients: int
 ) -> tuple[fx.GraphModule, fx.GraphModule, int]:
     # we could consider doing this is a non-mutating way
     bw_gm = copy.deepcopy(bw_gm_old)

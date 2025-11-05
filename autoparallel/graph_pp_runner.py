@@ -36,7 +36,8 @@ class GraphMeta:
     num_mutate_inputs: int
     num_user_outputs: int
     num_symints_saved_for_bw: int
-    num_weight_buffer_grads: int
+    num_params: int
+    num_buffers: int
     num_input_grads: int
 
 
@@ -77,7 +78,7 @@ class GraphPipelineStage(PipelineStage):
 
 def _run_fw_module(
     fw_module: fx.GraphModule, graph_meta: GraphMeta, fw_args: list[Any]
-) -> tuple[Any, tuple[Any, Any]]:
+) -> tuple[Any, tuple[list[Any], list[Any]]]:
     assert len([n for n in fw_module.graph.nodes if n.op == "placeholder"]) == len(
         fw_args
     ), f"Mismatched number of inputs to fwd, {len([n for n in fw_module.graph.nodes if n.op == 'placeholder'])}, {len(fw_args)}"
@@ -98,28 +99,58 @@ def _run_fw_module(
 
 def _run_full_bw_module(
     bw_module: fx.GraphModule, graph_meta: GraphMeta, bw_args
-) -> tuple[Any, list[Any]]:
+) -> tuple[list[Any], list[Any]]:
     assert len([n for n in bw_module.graph.nodes if n.op == "placeholder"]) == len(
         bw_args
-    ), "Mismatched number of inputs to bwd"
+    ), "Mismatched number of inputs to full bwd"
     bw_outputs = torch.fx.Interpreter(bw_module).boxed_run(bw_args)
-    param_buffer_grads = bw_outputs[: graph_meta.num_weight_buffer_grads]
-    input_grads = bw_outputs[graph_meta.num_weight_buffer_grads :]
+    num_params_buffers = graph_meta.num_params + graph_meta.num_buffers
+    param_buffer_grads = bw_outputs[:num_params_buffers]
+    input_grads = bw_outputs[num_params_buffers:]
     return input_grads, param_buffer_grads
 
 
-def _run_split_bw_module(
-    bw_dI_gm: fx.GraphModule, bw_dW_gm: fx.GraphModule, graph_meta: GraphMeta, bw_args
-) -> tuple[Any, list[Any]]:
-    assert len([n for n in bw_dI_gm.graph.nodes if n.op == "placeholder"]) == len(
-        bw_args
-    ), "Mismatched number of inputs to bwd"
-    inp_grads_and_activations = torch.fx.Interpreter(bw_dI_gm).boxed_run(bw_args)
+def _run_dI_bw_module(
+    bw_dI_module: fx.GraphModule, graph_meta: GraphMeta, bw_dI_args
+) -> tuple[list[Any], list[Any]]:
+    assert len([n for n in bw_dI_module.graph.nodes if n.op == "placeholder"]) == len(
+        bw_dI_args
+    ), "Mismatched number of inputs to dI bwd"
+    inp_grads_and_activations = torch.fx.Interpreter(bw_dI_module).boxed_run(bw_dI_args)
     inp_grads, activations = inp_grads_and_activations[
         : graph_meta.num_input_grads
     ], list(inp_grads_and_activations[graph_meta.num_input_grads :])
-    weight_grads = torch.fx.Interpreter(bw_dW_gm).boxed_run(activations)
-    return inp_grads, weight_grads
+    return inp_grads, activations
+
+
+def _run_dW_bw_module(
+    bw_dW_module: fx.GraphModule, graph_meta: GraphMeta, bw_dW_args
+) -> list[Any]:
+    assert len([n for n in bw_dW_module.graph.nodes if n.op == "placeholder"]) == len(
+        bw_dW_args
+    ), "Mismatched number of inputs to dW bwd"
+    param_buffer_grads = torch.fx.Interpreter(bw_dW_module).boxed_run(bw_dW_args)
+    return param_buffer_grads
+
+
+def _run_unshard_module(
+    unshard_module: fx.GraphModule, graph_meta: GraphMeta, unshard_args
+) -> list[Any]:
+    assert len([n for n in unshard_module.graph.nodes if n.op == "placeholder"]) == len(
+        unshard_args
+    ), "Mismatched number of inputs to unshard"
+    unsharded_params = torch.fx.Interpreter(unshard_module).boxed_run(unshard_args)
+    return unsharded_params
+
+
+def _run_reduce_grad_module(
+    reduce_grad_module: fx.GraphModule, graph_meta: GraphMeta, reduce_grad_args
+) -> list[Any]:
+    assert len(
+        [n for n in reduce_grad_module.graph.nodes if n.op == "placeholder"]
+    ) == len(reduce_grad_args), "Mismatched number of inputs to reduce_grad"
+    sharded_grads = torch.fx.Interpreter(reduce_grad_module).boxed_run(reduce_grad_args)
+    return sharded_grads
 
 
 def _run_forward_microbatch(stage: GraphPipelineStage, *args) -> tuple[Any, Any]:
@@ -146,6 +177,7 @@ def _run_backward_microbatch(
         *tensors_for_backward,
         *tangents,
     ]
+    del tensors_for_backward, non_tensors_for_backward, tangents, saved_intermediates
     input_grads, param_buffer_grads = _run_full_bw_module(
         backward_stage.graph_callables.full_bw, backward_stage.graph_meta, bw_args
     )
@@ -155,6 +187,7 @@ def _run_backward_microbatch(
         : len(backward_stage.state["sharded_params"])
     ]
     assert len(unsharded_grads) == len(grads_to_accumulate)
+    assert not all(grad is None for grad in grads_to_accumulate), "All grads are None"
     for unsharded_grad, grad_to_accumulate in zip(unsharded_grads, grads_to_accumulate):
         if grad_to_accumulate is not None:
             if unsharded_grad is None:
