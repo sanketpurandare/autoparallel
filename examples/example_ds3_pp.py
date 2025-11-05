@@ -373,7 +373,9 @@ def run_test(fake_evaluate: bool = True):
             num_mutate_inputs=graph_meta["num_mutate_inputs"],
             num_user_outputs=graph_meta["num_user_outputs"],
             num_symints_saved_for_bw=graph_meta["num_symints_saved_for_bw"],
-            num_weight_buffer_grads=graph_meta["num_weight_buffer_grads"],
+            num_params=graph_meta["num_params"],
+            num_buffers=graph_meta["num_buffers"],
+            num_input_grads=graph_meta["num_input_grads"],
         )
         trace_structured(
             "artifact",
