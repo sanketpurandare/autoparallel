@@ -39,7 +39,12 @@ def _get_pp_module_and_graphs(
 ) -> tuple[torch.nn.Module, GraphCallables, GraphMeta]:
 
     with AutoParallelPP(
-        model, tracing_input_fn, mesh, dynamic=True, reshard_after_forward=False
+        model,
+        tracing_input_fn,
+        mesh,
+        dynamic=True,
+        compile=False,
+        reshard_after_forward=False,
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
