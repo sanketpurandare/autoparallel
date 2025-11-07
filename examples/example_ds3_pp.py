@@ -16,6 +16,9 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.pipelining.schedules import (
     FORWARD,
     FULL_BACKWARD,
+    REDUCE_GRAD,
+    RESHARD,
+    UNSHARD,
     PipelineScheduleMulti,
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -42,8 +45,15 @@ from autoparallel.graph_pp_runner import (
     GraphPPRunner,
     stage_forward,
     stage_full_backward,
+    stage_reduce_grad,
+    stage_reshard,
+    stage_unshard,
 )
 
+# Configure logging to show DEBUG messages
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +64,7 @@ def build_pipeline_schedule(
     microbatch_size: int,
     local_batch_size: int,
     pipeline_parallel_degree: int,
+    backward_requires_autograd: bool = False,
 ) -> _PipelineSchedule:
     """Builds a pipeline schedule for the given configuration and stages."""
     schedule_class = get_schedule_class(pipeline_parallel_schedule)
@@ -78,6 +89,7 @@ def build_pipeline_schedule(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
+        backward_requires_autograd=backward_requires_autograd,
     )
     logger.info(
         f"Using pipeline schedule {pipeline_parallel_schedule} "
@@ -427,11 +439,15 @@ def run_test(fake_evaluate: bool = True):
         microbatch_size=microbatch_size,
         local_batch_size=local_batch_size,
         pipeline_parallel_degree=pp_degree,
+        backward_requires_autograd=False,
     )
     assert isinstance(schedule, _PipelineScheduleRuntime)
     # Step 6. Override the pipeline runner's action implementations
     schedule.register_custom_function(FORWARD, stage_forward)
     schedule.register_custom_function(FULL_BACKWARD, stage_full_backward)
+    schedule.register_custom_function(REDUCE_GRAD, stage_reduce_grad)
+    schedule.register_custom_function(RESHARD, stage_reshard)
+    schedule.register_custom_function(UNSHARD, stage_unshard)
 
     # Step 7. Register the schedule with the graph runner
 
