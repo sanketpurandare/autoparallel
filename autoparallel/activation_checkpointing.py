@@ -123,7 +123,9 @@ def force_save_fsdp_all_gather(graph: torch.fx.Graph) -> None:
                                 potential_cat_op == getitem_user
                                 for getitem_user in getitem_users
                             ) and (
-                                potential_cat_op.target == torch.ops.aten.cat.default
+                                potential_cat_op.op == "call_function"
+                                and potential_cat_op.target
+                                == torch.ops.aten.cat.default
                             ):
                                 w = potential_cat_op
                                 continue
@@ -144,8 +146,9 @@ def force_save_fsdp_all_gather(graph: torch.fx.Graph) -> None:
                 # 6. If the last node in this chain is used in backward, only then we save the wait_tensor
                 nodes_to_save.append(last_ag_wait_node)
                 primal_origins.append(primal)
-    print(f"force_save_fsdp_all_gather, primal_origins: {primal_origins}")
-    print(f"force_save_fsdp_all_gather, nodes_to_save: {nodes_to_save}")
+    logger.info("force_save_fsdp_all_gather, primal_origins: %s", primal_origins)
+    logger.info("force_save_fsdp_all_gather, nodes_to_save: %s", nodes_to_save)
+
     for node in nodes_to_save:
         node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
         node.meta["ac_graph_id"] = AP_AC_GRAPH_ID
