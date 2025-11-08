@@ -17,6 +17,7 @@ from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor,
     is_reduce_scatter_tensor,
+    is_wait_tensor,
 )
 
 
@@ -77,6 +78,7 @@ def split_fsdp_prefetch(
             prefetch_g_outs_map.append(param_g_in)
         else:
             w_n = next(iter(last_ag.users))
+            assert is_wait_tensor(w_n)
             prefetch_g_outs_map.append(w_n)
 
     prefetch_g_outs = prefetch_g_outs_map
@@ -126,7 +128,7 @@ def split_fsdp_reduce_scatters_epilogue(
     grad_outs_map = []
     for grad_out in grad_outs:
         n = grad_out
-        last_rs = None
+        earliest_rs = None
         while n is not None:
             if len(n.all_input_nodes) != 1:
                 break
@@ -135,12 +137,13 @@ def split_fsdp_reduce_scatters_epilogue(
                 break
             prev_n = n
             n = n_in
+            # Maybe we also need to track all_reduce?
             if is_reduce_scatter_tensor(prev_n):
                 # In AP for mesh dim > 1
                 # The reduction of gradients happen in multiple steps
-                last_rs = n
-        if last_rs is not None:
-            grad_outs_map.append(last_rs)
+                earliest_rs = n
+        if earliest_rs is not None:
+            grad_outs_map.append(earliest_rs)
         else:
             grad_outs_map.append(grad_out)
 
